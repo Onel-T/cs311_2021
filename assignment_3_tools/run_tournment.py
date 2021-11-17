@@ -3,12 +3,14 @@ import argparse
 import random
 import subprocess
 
+import sqlite3
+
 
 
 def run_game(player_a, player_b):
     players = [player_a, player_b]
     iterations = 100 
-    for i in range(2):
+    for i in [0,1]:
         p = players[i]
         p['game_years'] = 0 
         p['last_move'] = "zero"
@@ -28,7 +30,7 @@ def run_game(player_a, player_b):
                     p['error'] = f"""Init Error .. crashed - {err}"""
                     error = True
     
-            last_move = players[0]['last_move'] if i == 1 else players[1]['last_move']
+            last_move = players[0]['last_move'] if j == 1 else players[1]['last_move']
             proc = subprocess.Popen([f"{p['runme']} --last_opponent_move {last_move}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,  shell=True , cwd= p['dir_name'])
             (out, err) = proc.communicate()
@@ -67,10 +69,24 @@ def run_game(player_a, player_b):
     else:
         print(f"Tie {players[0]['game_years']} = {players[1]['game_years']}")
 
+    return (players[0]['game_years'], players[1]['game_years'], int( 'error' in  players[0]), int( 'error' in  players[1]) )
+
 
 PULL_DIR = "repos"
 
 fork_list = []
+black_list = {}
+
+with open("black.list", "r") as f:
+    all_forks = f.read()
+    for ffork in all_forks.split('\n'):
+        parts = ffork.split()
+        # example line ['@atilla20cs', 'atilla20cs', '/', 'cs311_2021']
+        if len(parts) != 4:
+            continue
+        black_list[parts[1]] = "block"
+
+
 with open("forkme.list", "r") as f:
     all_forks = f.read()
     for ffork in all_forks.split('\n'):
@@ -78,13 +94,16 @@ with open("forkme.list", "r") as f:
         # example line ['@atilla20cs', 'atilla20cs', '/', 'cs311_2021']
         if len(parts) != 4:
             continue
-        fork_list.append( {"github_user" : parts[1], "repo" : parts[3]} )
+        if parts[1] in black_list:
+            continue
 
+        fork_list.append( {"github_user" : parts[1], "repo" : parts[3]} )
 
 #clean up
 os.system(f"rm -rf {PULL_DIR}")
 
 players = []
+players_by_name = {}
 #load them up
 for f in fork_list:
     os.system(f"mkdir -p {PULL_DIR}/{f['github_user']}")
@@ -99,42 +118,119 @@ for f in fork_list:
     except:
         players.append({"player": f['github_user'], "error" : "runme.txt did not load!!!!" } )
         print(f"!!!!!!!!!!! Player {f['github_user']} did not load!!!!!!")
+    players_by_name[ players[-1]['player'] ] = players[-1]
 
+
+
+#setup the db
+
+db = sqlite3.connect('tourment.db')
+cur = db.cursor()
+
+
+cur.execute("create table games (player_a text, player_b text, t_round interger, player_a_years integer, player_b_years integer, player_a_error int, player_b_error int)")
+db.commit()
 
 #init
-for p in players:
-    p["who_i_played_this_round"] = []
-for p in players:
-    if "error" in p:
-        continue
-    for pp in players:
-        if pp == p or "error" in pp:
+t_round = 0
+while t_round < 100: #Just don't like inifinate loops 
+    random.shuffle(players)
+    for p in players:
+        p["who_i_played_this_round"] = []
+    for p in players:
+        if "error" in p:
             continue
-        if pp in p["who_i_played_this_round"] or p in pp["who_i_played_this_round"] :
-            continue 
+        for pp in players:
+            if pp == p or "error" in pp:
+                continue
+            if pp in p["who_i_played_this_round"] or p in pp["who_i_played_this_round"] :
+                continue 
 
-        print(p["player"],pp["player"])
-        run_game(p, pp)
-        p["who_i_played_this_round"].append(pp)
+            print(f"Palyer {p['player']} vs {pp['player']}")
+            player_a_years, player_b_years, player_a_err, player_b_err = run_game(p, pp)
+            p["who_i_played_this_round"].append(pp)
+            cur.execute(f"""insert into games values ('{p["player"]}', '{pp["player"]}',
+                    {t_round}, {player_a_years}, {player_b_years},
+                    {player_a_err} , {player_b_err} )""")
+            db.commit()
 
 
-good = []
-bad = []
-for p in players:
-    if "error" in p:
+
+    #get bad list
+    bad =[]
+    cur.execute(f"""select player_a from games where t_round = {t_round} and player_a_error =1
+            UNION 
+            select player_b from games where t_round = {t_round} and player_b_error =1 """)
+    for r in cur.fetchall():
+        p =  players_by_name[ r[0] ]
         bad.append( f"{p['player']} you have a problem! {p['error']}")
-    else:
-        good.append(f"{p['player']} YES!!!! It worked!!!")
 
-print("!!!!!!!!! Working !!!!!!!!!!!")
-for p in good:
-    print(p)
+    #get good list
+    good =[]
+    cur.execute(f"""select player_a from games where t_round = {t_round} and player_a_error =0 and player_a_years <= player_b_years
+            UNION
+            select player_b from games where t_round = {t_round} and player_b_error =0 and player_b_years <= player_a_years """)
+    for r in cur.fetchall():
+        p = players_by_name[ r[0] ]
+        good.append( f"{p['player']} YES!!!! It worked!!!" )
 
-print("")
-print("!!!!!!!!! NOT Working !!!!!!!!!!!")
-for p in bad:
-    print(p)
 
+    print("!!!!!!!!! Working !!!!!!!!!!!")
+    for p in good:
+        print(p)
+
+    print("")
+    print("!!!!!!!!! NOT Working !!!!!!!!!!!")
+    for p in bad:
+        print(p)
+
+    print("")
+    print("!!!!!!!!! NOT Accepted LIST !!!!!!!!!!!")
+    for p in black_list:
+        print(p)
+
+
+    #who moves on?
+    cur.execute(f"""select player, sum(total) as total from
+                (select player_b as player, sum(player_b_years) as total from games where 
+                t_round = {t_round} and player_b_error =0 group by player union select player_a as player, sum(player_a_years) as total from 
+                games where t_round = {t_round} and player_a_error =0 group by player) group by player order by total asc;""")
+    ordered_players = []
+    for r in cur.fetchall():
+        ordered_players.append(r)
+
+    if len(ordered_players) == 1:
+        print("!!!!!!!!!! Winner !!!!!!!!!!!")
+        print(ordered_players)
+        break
+
+    top_half = ordered_players[:int(len(ordered_players)/2)]
+    print(f"Players Left {len(top_half)}")
+    if len(top_half) == 1:
+        print("!!!!!!!!!! Winner !!!!!!!!!!!")
+        print(top_half)
+        break
+
+    last_place = top_half[-1]
+    for i in range(int(len(ordered_players)/2), len(ordered_players)):
+        #just in case :)
+        if last_place[0] == ordered_players[i][0]:
+            continue
+        if last_place[1] == ordered_players[i][1]:
+            print(f"tie - {ordered_players[i]}")
+            top_half.append(ordered_players[i])
+
+    print("!!!!!!!!! Moving to Next Round !!!!!!!!")
+    new_players = []
+    for p in top_half:
+        print(p[0])
+        new_players.append( players_by_name[p[0]])
+    players = new_players
+
+    t_round += 1
+    print(f"------------------Round {t_round} -----------")
+
+print("All done")
 
 
 
